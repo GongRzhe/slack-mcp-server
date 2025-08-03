@@ -1060,6 +1060,994 @@ def bulk_conversations_history(
         "success": True
     }
 
+@mcp.tool  
+def conversations(
+    operation: str,
+    channel_ids: Optional[str] = None,
+    channel_id: Optional[str] = None,
+    message_ts: Optional[str] = None,
+    search_query: Optional[str] = None,
+    limit: str = "1d",
+    cursor: Optional[str] = None,
+    include_user_details: bool = True,
+    include_activity_messages: bool = False,
+    filter_user: Optional[str] = None,
+    filter_in_channel: Optional[str] = None,
+    filter_users_from: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    UNIFIED CONVERSATIONS TOOL - All messaging operations in one efficient tool
+    
+    Replaces: conversations_history, bulk_conversations_history, conversations_replies,
+    conversations_search_messages, message_permalink (5 tools → 1 tool)
+    
+    Operations:
+        history - Get messages from single channel
+        bulk_history - Get messages from multiple channels (efficient)
+        replies - Get thread messages  
+        search - Search messages with filters
+        permalink - Get permanent link to message
+    
+    Args:
+        operation: Operation type (history, bulk_history, replies, search, permalink)
+        channel_ids: Comma-separated channels for bulk_history ("#general, #random")
+        channel_id: Single channel for history/replies/permalink
+        message_ts: Message timestamp for replies/permalink
+        search_query: Search terms for search operation
+        limit: Time format (1d, 1w) or number (50)
+        cursor: Pagination cursor
+        include_user_details: Include user names/details
+        include_activity_messages: Include join/leave messages
+        filter_user: Filter messages by user (@user, U123456)
+        filter_in_channel: Limit search to specific channel
+        filter_users_from: Search messages from specific users
+    
+    Returns:
+        Unified response with operation-specific data and efficiency metrics
+    """
+    client = get_slack_client()
+    
+    try:
+        if operation == "history":
+            # Single channel history
+            if not channel_id:
+                return {"error": "channel_id required for history operation", "success": False}
+                
+            resolved_channel_id = client.resolve_channel_id(channel_id)
+            
+            params = {
+                "channel": resolved_channel_id,
+                "include_all_metadata": include_activity_messages
+            }
+            
+            if cursor:
+                params["cursor"] = cursor
+            else:
+                limit_params = parse_limit(limit)
+                params.update(limit_params)
+            
+            data = client._make_request("conversations.history", params)
+            messages = data.get("messages", [])
+            
+            # Apply user filter if specified
+            if filter_user:
+                filter_user_id = client.resolve_user_id(filter_user) if filter_user else None
+                if filter_user_id:
+                    messages = [msg for msg in messages if msg.get("user") == filter_user_id]
+            
+            # Enhance with user details
+            if include_user_details and messages:
+                users = client.get_cached_users()
+                user_lookup = {user["id"]: user for user in users}
+                
+                for message in messages:
+                    user_id = message.get("user")
+                    if user_id and user_id in user_lookup:
+                        user_data = user_lookup[user_id]
+                        message["user_details"] = {
+                            "name": user_data.get("name"),
+                            "real_name": user_data.get("real_name"),
+                            "display_name": user_data.get("profile", {}).get("display_name")
+                        }
+            
+            return {
+                "operation": "history",
+                "channel_id": resolved_channel_id,
+                "messages": messages,
+                "message_count": len(messages),
+                "has_more": data.get("has_more", False),
+                "next_cursor": data.get("response_metadata", {}).get("next_cursor"),
+                "api_calls": 1,
+                "success": True
+            }
+            
+        elif operation == "bulk_history":
+            # Multiple channels history (reuse existing bulk logic)
+            if not channel_ids:
+                return {"error": "channel_ids required for bulk_history operation", "success": False}
+                
+            # Use existing bulk_conversations_history logic
+            channel_list = [c.strip() for c in channel_ids.split(",")]
+            results = []
+            total_messages = 0
+            api_calls = 0
+            failed_channels = []
+            
+            # Load user cache once
+            users_cache = {}
+            if include_user_details or filter_user:
+                try:
+                    cached_users = client.get_cached_users()
+                    users_cache = {user.get("id"): user for user in cached_users if user.get("id")}
+                except:
+                    pass
+            
+            # Resolve filter user
+            filter_user_id = None
+            if filter_user:
+                filter_user_id = client.resolve_user_id(filter_user) if filter_user else None
+            
+            # Process each channel
+            for channel_input in channel_list:
+                if not channel_input:
+                    continue
+                    
+                try:
+                    resolved_channel_id = client.resolve_channel_id(channel_input)
+                    
+                    params = {
+                        "channel": resolved_channel_id,
+                        "include_all_metadata": include_activity_messages
+                    }
+                    
+                    limit_params = parse_limit(limit)
+                    params.update(limit_params)
+                    
+                    data = client._make_request("conversations.history", params)
+                    messages = data.get("messages", [])
+                    api_calls += 1
+                    
+                    # Filter by user if specified
+                    if filter_user_id:
+                        messages = [msg for msg in messages if msg.get("user") == filter_user_id]
+                    
+                    # Enhance with user details
+                    if include_user_details and messages:
+                        for message in messages:
+                            user_id = message.get("user")
+                            if user_id and user_id in users_cache:
+                                user_data = users_cache[user_id]
+                                message["user_details"] = {
+                                    "name": user_data.get("name"),
+                                    "real_name": user_data.get("real_name"),
+                                    "display_name": user_data.get("profile", {}).get("display_name")
+                                }
+                    
+                    # Add channel context
+                    for message in messages:
+                        message["channel_context"] = {
+                            "channel_id": resolved_channel_id,
+                            "channel_input": channel_input
+                        }
+                    
+                    total_messages += len(messages)
+                    
+                    results.append({
+                        "channel_id": resolved_channel_id,
+                        "channel_input": channel_input,
+                        "messages": messages,
+                        "message_count": len(messages),
+                        "success": True
+                    })
+                    
+                except Exception as e:
+                    failed_channels.append({
+                        "channel_input": channel_input,
+                        "error": str(e)
+                    })
+            
+            return {
+                "operation": "bulk_history",
+                "channels": results,
+                "summary": {
+                    "total_channels": len(channel_list),
+                    "successful_channels": len(results),
+                    "failed_channels": len(failed_channels),
+                    "total_messages": total_messages,
+                    "api_calls": api_calls,
+                    "filter_user": filter_user,
+                    "filter_user_id": filter_user_id
+                },
+                "failed_channels": failed_channels,
+                "efficiency_note": f"Retrieved messages from {len(results)} channels with {api_calls} API calls",
+                "success": True
+            }
+            
+        elif operation == "replies":
+            # Thread replies
+            if not channel_id or not message_ts:
+                return {"error": "channel_id and message_ts required for replies operation", "success": False}
+                
+            resolved_channel_id = client.resolve_channel_id(channel_id)
+            
+            params = {
+                "channel": resolved_channel_id,
+                "ts": message_ts
+            }
+            
+            if cursor:
+                params["cursor"] = cursor
+            
+            data = client._make_request("conversations.replies", params)
+            messages = data.get("messages", [])
+            
+            # Enhance with user details
+            if include_user_details and messages:
+                users = client.get_cached_users()
+                user_lookup = {user["id"]: user for user in users}
+                
+                for message in messages:
+                    user_id = message.get("user")
+                    if user_id and user_id in user_lookup:
+                        user_data = user_lookup[user_id]
+                        message["user_details"] = {
+                            "name": user_data.get("name"),
+                            "real_name": user_data.get("real_name"),
+                            "display_name": user_data.get("profile", {}).get("display_name")
+                        }
+            
+            return {
+                "operation": "replies",
+                "channel_id": resolved_channel_id,
+                "thread_ts": message_ts,
+                "messages": messages,
+                "message_count": len(messages),
+                "has_more": data.get("has_more", False),
+                "next_cursor": data.get("response_metadata", {}).get("next_cursor"),
+                "api_calls": 1,
+                "success": True
+            }
+            
+        elif operation == "search":
+            # Search messages
+            if not search_query:
+                return {"error": "search_query required for search operation", "success": False}
+                
+            params = {
+                "query": search_query,
+                "count": parse_limit(limit).get("limit", 100)
+            }
+            
+            # Apply filters
+            if filter_in_channel:
+                resolved_filter_channel = client.resolve_channel_id(filter_in_channel)
+                params["query"] += f" in:#{resolved_filter_channel}"
+            
+            if filter_users_from:
+                user_id = client.resolve_user_id(filter_users_from) if filter_users_from else None
+                if user_id:
+                    params["query"] += f" from:{user_id}"
+            
+            data = client._make_request("search.messages", params)
+            
+            messages = []
+            if data.get("messages") and data["messages"].get("matches"):
+                messages = data["messages"]["matches"]
+                
+                # Enhance with user details
+                if include_user_details:
+                    users = client.get_cached_users()
+                    user_lookup = {user["id"]: user for user in users}
+                    
+                    for message in messages:
+                        user_id = message.get("user")
+                        if user_id and user_id in user_lookup:
+                            user_data = user_lookup[user_id]
+                            message["user_details"] = {
+                                "name": user_data.get("name"),
+                                "real_name": user_data.get("real_name"),
+                                "display_name": user_data.get("profile", {}).get("display_name")
+                            }
+            
+            return {
+                "operation": "search",
+                "search_query": search_query,
+                "messages": messages,
+                "message_count": len(messages),
+                "total_results": data.get("messages", {}).get("total", 0),
+                "api_calls": 1,
+                "success": True
+            }
+            
+        elif operation == "permalink":
+            # Get message permalink
+            if not channel_id or not message_ts:
+                return {"error": "channel_id and message_ts required for permalink operation", "success": False}
+                
+            resolved_channel_id = client.resolve_channel_id(channel_id)
+            
+            data = client._make_request("chat.getPermalink", {
+                "channel": resolved_channel_id,
+                "message_ts": message_ts
+            })
+            
+            return {
+                "operation": "permalink",
+                "channel_id": resolved_channel_id,
+                "message_ts": message_ts,
+                "permalink": data.get("permalink"),
+                "api_calls": 1,
+                "success": True
+            }
+            
+        else:
+            return {
+                "error": f"Unknown operation: {operation}. Valid: history, bulk_history, replies, search, permalink",
+                "success": False
+            }
+            
+    except Exception as e:
+        return {
+            "error": str(e),
+            "operation": operation,
+            "success": False
+        }
+
+@mcp.tool
+def channels(
+    operation: str,
+    channel_types: str = "public_channel,private_channel",
+    channel_id: Optional[str] = None,
+    channel_ids: Optional[str] = None,
+    sort: Optional[str] = None,
+    limit: int = 100,
+    cursor: Optional[str] = None,
+    include_locale: bool = False,
+    include_detailed_info: bool = False,
+    use_cache: bool = True
+) -> Dict[str, Any]:
+    """
+    UNIFIED CHANNELS TOOL - All channel operations in one efficient tool
+    
+    Replaces: channels_list, channels_detailed, channel_info, channel_members (4 tools → 1 tool)
+    
+    Operations:
+        list - List channels with basic info
+        detailed - List channels with comprehensive info (efficient bulk)
+        info - Get detailed info for specific channel
+        members - List members of specific channel
+        bulk_info - Get info for multiple channels efficiently
+    
+    Args:
+        operation: Operation type (list, detailed, info, members, bulk_info)
+        channel_types: Channel types for list/detailed (public_channel,private_channel,mpim,im)
+        channel_id: Single channel for info/members operations
+        channel_ids: Comma-separated channels for bulk_info
+        sort: Sorting (popularity - by member count)
+        limit: Max items to return
+        cursor: Pagination cursor
+        include_locale: Include locale info for info operation
+        include_detailed_info: Make extra API calls for detailed operation (slower)
+        use_cache: Use cache for info operations (default: True)
+    
+    Returns:
+        Unified response with operation-specific data and efficiency metrics
+    """
+    client = get_slack_client()
+    
+    try:
+        if operation == "list":
+            # Basic channel list
+            valid_types = {"mpim", "im", "public_channel", "private_channel"}
+            types = [t.strip() for t in channel_types.split(",")]
+            
+            for t in types:
+                if t not in valid_types:
+                    raise Exception(f"Invalid channel type: {t}. Valid types: {', '.join(valid_types)}")
+            
+            params = {
+                "types": channel_types,
+                "limit": min(max(limit, 1), 999)
+            }
+            
+            if cursor:
+                params["cursor"] = cursor
+            
+            data = client._make_request("conversations.list", params)
+            channels = data.get("channels", [])
+            
+            # Sort by popularity if requested
+            if sort == "popularity":
+                channels.sort(key=lambda x: x.get("num_members", 0), reverse=True)
+            
+            return {
+                "operation": "list",
+                "channels": channels,
+                "channel_count": len(channels),
+                "next_cursor": data.get("response_metadata", {}).get("next_cursor"),
+                "api_calls": 1,
+                "success": True
+            }
+            
+        elif operation == "detailed":
+            # Comprehensive channel list with enhanced info
+            valid_types = {"mpim", "im", "public_channel", "private_channel"}
+            types = [t.strip() for t in channel_types.split(",")]
+            
+            for t in types:
+                if t not in valid_types:
+                    raise Exception(f"Invalid channel type: {t}. Valid types: {', '.join(valid_types)}")
+            
+            params = {
+                "types": channel_types,
+                "limit": min(max(limit, 1), 999)
+            }
+            
+            # Single API call to get all channel data
+            data = client._make_request("conversations.list", params)
+            channels = data.get("channels", [])
+            
+            # Sort by popularity if requested
+            if sort == "popularity":
+                channels.sort(key=lambda x: x.get("num_members", 0), reverse=True)
+            
+            # Enhance with cached user data for DMs
+            users_cache = {}
+            try:
+                cached_users = client.get_cached_users()
+                users_cache = {user.get("id"): user for user in cached_users if user.get("id")}
+            except:
+                pass
+            
+            # Process channels and add helpful information
+            processed_channels = []
+            detailed_calls = 0
+            
+            for channel in channels:
+                processed_channel = dict(channel)  # Copy original data
+                
+                # Add user info for DMs
+                if channel.get("is_im") and channel.get("user"):
+                    user_id = channel["user"]
+                    if user_id in users_cache:
+                        processed_channel["user_info"] = {
+                            "name": users_cache[user_id].get("name"),
+                            "real_name": users_cache[user_id].get("real_name"),
+                            "display_name": users_cache[user_id].get("profile", {}).get("display_name")
+                        }
+                
+                # Add detailed info only if explicitly requested
+                if include_detailed_info and not channel.get("is_im"):
+                    try:
+                        detail_data = client._make_request("conversations.info", {"channel": channel["id"]})
+                        detailed_info = detail_data.get("channel", {})
+                        # Merge additional details
+                        for key, value in detailed_info.items():
+                            if key not in processed_channel or not processed_channel[key]:
+                                processed_channel[key] = value
+                        processed_channel["detailed_source"] = "api"
+                        detailed_calls += 1
+                    except:
+                        processed_channel["detailed_source"] = "unavailable"
+                
+                processed_channels.append(processed_channel)
+            
+            return {
+                "operation": "detailed",
+                "channels": processed_channels,
+                "total_channels": len(processed_channels),
+                "api_calls": 1 + detailed_calls,
+                "efficiency_note": f"Used 1 conversations.list call instead of {len(processed_channels)} individual channel_info calls",
+                "detailed_calls": detailed_calls if include_detailed_info else 0,
+                "next_cursor": data.get("response_metadata", {}).get("next_cursor"),
+                "success": True,
+                "performance": "optimized" if not include_detailed_info else "detailed_mode"
+            }
+            
+        elif operation == "info":
+            # Single channel detailed info
+            if not channel_id:
+                return {"error": "channel_id required for info operation", "success": False}
+                
+            resolved_channel_id = client.resolve_channel_id(channel_id)
+            
+            # Try cache first if enabled
+            if use_cache:
+                try:
+                    channels = client.get_cached_channels()
+                    for channel in channels:
+                        if channel.get("id") == resolved_channel_id:
+                            return {
+                                "operation": "info",
+                                "channel": channel,
+                                "source": "cache",
+                                "cache_file": client.channels_cache_file,
+                                "api_calls": 0,
+                                "success": True,
+                                "note": "Data from cache. Set use_cache=false for fresh API data."
+                            }
+                except Exception:
+                    pass
+            
+            # Fall back to API call
+            params = {
+                "channel": resolved_channel_id,
+                "include_locale": include_locale
+            }
+            
+            try:
+                data = client._make_request("conversations.info", params)
+                return {
+                    "operation": "info",
+                    "channel": data.get("channel", {}),
+                    "source": "api",
+                    "api_calls": 1,
+                    "success": True,
+                    "note": "Fresh data from Slack API"
+                }
+            except Exception as e:
+                # Try cache as last resort
+                if not use_cache:
+                    try:
+                        channels = client.get_cached_channels()
+                        for channel in channels:
+                            if channel.get("id") == resolved_channel_id:
+                                return {
+                                    "operation": "info",
+                                    "channel": channel,
+                                    "source": "cache_fallback",
+                                    "api_calls": 0,
+                                    "success": True,
+                                    "warning": f"API failed ({str(e)}), using cached data instead"
+                                }
+                    except:
+                        pass
+                
+                return {
+                    "operation": "info",
+                    "error": str(e),
+                    "success": False,
+                    "channel_id": channel_id,
+                    "resolved_channel_id": resolved_channel_id,
+                    "note": "Both cache and API failed"
+                }
+                
+        elif operation == "members":
+            # Channel members list
+            if not channel_id:
+                return {"error": "channel_id required for members operation", "success": False}
+                
+            resolved_channel_id = client.resolve_channel_id(channel_id)
+            
+            params = {
+                "channel": resolved_channel_id,
+                "limit": min(limit, 1000)
+            }
+            
+            if cursor:
+                params["cursor"] = cursor
+            
+            data = client._make_request("conversations.members", params)
+            member_ids = data.get("members", [])
+            
+            # Enhance with user details from cache
+            members_with_details = []
+            try:
+                users = client.get_cached_users()
+                user_lookup = {user["id"]: user for user in users}
+                
+                for member_id in member_ids:
+                    if member_id in user_lookup:
+                        user_data = user_lookup[member_id]
+                        members_with_details.append({
+                            "id": member_id,
+                            "name": user_data.get("name"),
+                            "real_name": user_data.get("real_name"),
+                            "display_name": user_data.get("profile", {}).get("display_name"),
+                            "is_bot": user_data.get("is_bot", False),
+                            "deleted": user_data.get("deleted", False)
+                        })
+                    else:
+                        members_with_details.append({"id": member_id, "details": "not_cached"})
+            except:
+                # Fallback to just IDs
+                members_with_details = [{"id": mid} for mid in member_ids]
+            
+            return {
+                "operation": "members",
+                "channel_id": resolved_channel_id,
+                "members": members_with_details,
+                "member_count": len(members_with_details),
+                "next_cursor": data.get("response_metadata", {}).get("next_cursor"),
+                "api_calls": 1,
+                "success": True
+            }
+            
+        elif operation == "bulk_info":
+            # Multiple channels info efficiently
+            if not channel_ids:
+                return {"error": "channel_ids required for bulk_info operation", "success": False}
+                
+            channel_list = [c.strip() for c in channel_ids.split(",")]
+            results = []
+            api_calls = 0
+            failed_channels = []
+            
+            # Load cache once if using cache
+            cached_channels = {}
+            if use_cache:
+                try:
+                    channels_data = client.get_cached_channels()
+                    cached_channels = {ch.get("id"): ch for ch in channels_data if ch.get("id")}
+                except:
+                    pass
+            
+            for channel_input in channel_list:
+                if not channel_input:
+                    continue
+                    
+                try:
+                    resolved_channel_id = client.resolve_channel_id(channel_input)
+                    
+                    # Try cache first
+                    if use_cache and resolved_channel_id in cached_channels:
+                        results.append({
+                            "channel_id": resolved_channel_id,
+                            "channel_input": channel_input,
+                            "channel": cached_channels[resolved_channel_id],
+                            "source": "cache",
+                            "success": True
+                        })
+                    else:
+                        # Fall back to API
+                        data = client._make_request("conversations.info", {"channel": resolved_channel_id})
+                        api_calls += 1
+                        results.append({
+                            "channel_id": resolved_channel_id,
+                            "channel_input": channel_input,
+                            "channel": data.get("channel", {}),
+                            "source": "api",
+                            "success": True
+                        })
+                        
+                except Exception as e:
+                    failed_channels.append({
+                        "channel_input": channel_input,
+                        "error": str(e)
+                    })
+            
+            return {
+                "operation": "bulk_info",
+                "channels": results,
+                "summary": {
+                    "total_channels": len(channel_list),
+                    "successful_channels": len(results),
+                    "failed_channels": len(failed_channels),
+                    "api_calls": api_calls,
+                    "cache_hits": len([r for r in results if r.get("source") == "cache"])
+                },
+                "failed_channels": failed_channels,
+                "efficiency_note": f"Retrieved info for {len(results)} channels with {api_calls} API calls (cache saved {len(results) - api_calls} calls)",
+                "success": True
+            }
+            
+        else:
+            return {
+                "error": f"Unknown operation: {operation}. Valid: list, detailed, info, members, bulk_info",
+                "success": False
+            }
+            
+    except Exception as e:
+        return {
+            "error": str(e),
+            "operation": operation,
+            "success": False
+        }
+
+@mcp.tool
+def users(
+    operation: str,
+    user_ids: Optional[str] = None,
+    user_id: Optional[str] = None,
+    filter_type: str = "active",
+    limit: int = 100,
+    use_cache: bool = True
+) -> Dict[str, Any]:
+    """
+    UNIFIED USERS TOOL - All user operations in one efficient tool
+    
+    Replaces: user_info, users_list, user_presence (3 tools → 1 tool)
+    
+    Operations:
+        info - Get detailed info for one or multiple users (supports bulk)
+        list - List all users with filtering options (cache-only for performance)
+        presence - Check user's online/away status
+        bulk_presence - Check presence for multiple users efficiently
+    
+    Args:
+        operation: Operation type (info, list, presence, bulk_presence)
+        user_ids: Comma-separated users for info/bulk_presence (@john, @jane, U123456789)
+        user_id: Single user for presence operation
+        filter_type: Filter for list operation (active, deleted, all, bots, humans)
+        limit: Max users to return for list operation
+        use_cache: Use cache for info/list operations (default: True)
+    
+    Returns:
+        Unified response with operation-specific data and efficiency metrics
+    """
+    client = get_slack_client()
+    
+    try:
+        if operation == "info":
+            # User info (single or multiple users)
+            if not user_ids:
+                return {"error": "user_ids required for info operation", "success": False}
+                
+            user_list = [u.strip() for u in user_ids.split(",")]
+            results = []
+            cache_hits = 0
+            api_calls = 0
+            
+            # Load cache once for all users
+            cached_users = {}
+            if use_cache:
+                try:
+                    users_data = client.get_cached_users()
+                    cached_users = {user.get("id"): user for user in users_data if user.get("id")}
+                except Exception:
+                    pass
+            
+            for user_input in user_list:
+                if not user_input:
+                    continue
+                    
+                # Resolve user name to ID
+                try:
+                    resolved_user_id = client.resolve_user_id(user_input)
+                    
+                    # Try cache first if enabled
+                    if use_cache and resolved_user_id in cached_users:
+                        user_data = cached_users[resolved_user_id]
+                        results.append({
+                            "user": {
+                                "id": user_data.get("id"),
+                                "name": user_data.get("name"),
+                                "real_name": user_data.get("real_name"),
+                                "display_name": user_data.get("profile", {}).get("display_name"),
+                                "email": user_data.get("profile", {}).get("email"),
+                                "phone": user_data.get("profile", {}).get("phone"),
+                                "title": user_data.get("profile", {}).get("title"),
+                                "is_bot": user_data.get("is_bot", False),
+                                "is_admin": user_data.get("is_admin", False),
+                                "deleted": user_data.get("deleted", False)
+                            },
+                            "source": "cache",
+                            "user_input": user_input
+                        })
+                        cache_hits += 1
+                    else:
+                        # Fall back to API
+                        try:
+                            data = client._make_request("users.info", {"user": resolved_user_id})
+                            api_calls += 1
+                            user_data = data.get("user", {})
+                            results.append({
+                                "user": {
+                                    "id": user_data.get("id"),
+                                    "name": user_data.get("name"),
+                                    "real_name": user_data.get("real_name"),
+                                    "display_name": user_data.get("profile", {}).get("display_name"),
+                                    "email": user_data.get("profile", {}).get("email"),
+                                    "phone": user_data.get("profile", {}).get("phone"),
+                                    "title": user_data.get("profile", {}).get("title"),
+                                    "is_bot": user_data.get("is_bot", False),
+                                    "is_admin": user_data.get("is_admin", False),
+                                    "deleted": user_data.get("deleted", False)
+                                },
+                                "source": "api",
+                                "user_input": user_input
+                            })
+                        except Exception as e:
+                            # Try cache as fallback
+                            if resolved_user_id in cached_users:
+                                user_data = cached_users[resolved_user_id]
+                                results.append({
+                                    "user": {
+                                        "id": user_data.get("id"),
+                                        "name": user_data.get("name"),
+                                        "real_name": user_data.get("real_name"),
+                                        "display_name": user_data.get("profile", {}).get("display_name")
+                                    },
+                                    "source": "cache_fallback",
+                                    "user_input": user_input,
+                                    "warning": f"API failed ({str(e)}), using cached data"
+                                })
+                            else:
+                                results.append({
+                                    "error": str(e),
+                                    "user_input": user_input,
+                                    "resolved_user_id": resolved_user_id,
+                                    "success": False
+                                })
+                                
+                except Exception as e:
+                    results.append({
+                        "error": f"Failed to resolve user: {str(e)}",
+                        "user_input": user_input,
+                        "success": False
+                    })
+            
+            # Handle single vs multiple response format
+            if len(user_list) == 1:
+                return {
+                    "operation": "info",
+                    **results[0] if results else {"error": "No users processed", "success": False},
+                    "summary": {
+                        "cache_hits": cache_hits,
+                        "api_calls": api_calls,
+                        "cache_file": client.users_cache_file if use_cache else None
+                    },
+                    "success": True if results and "error" not in results[0] else False
+                }
+            else:
+                return {
+                    "operation": "info",
+                    "users": results,
+                    "summary": {
+                        "total_users": len(user_list),
+                        "successful_users": len([r for r in results if "error" not in r]),
+                        "cache_hits": cache_hits,
+                        "api_calls": api_calls,
+                        "cache_file": client.users_cache_file if use_cache else None
+                    },
+                    "success": True
+                }
+                
+        elif operation == "list":
+            # List users with filtering (cache-only for performance)
+            try:
+                users_data = client.get_cached_users()
+                
+                # Apply filters
+                filtered_users = []
+                for user in users_data:
+                    if filter_type == "active" and user.get("deleted", False):
+                        continue
+                    elif filter_type == "deleted" and not user.get("deleted", False):
+                        continue
+                    elif filter_type == "bots" and not user.get("is_bot", False):
+                        continue
+                    elif filter_type == "humans" and user.get("is_bot", False):
+                        continue
+                    # filter_type == "all" includes everything
+                    
+                    filtered_users.append({
+                        "id": user.get("id"),
+                        "name": user.get("name"),
+                        "real_name": user.get("real_name"),
+                        "display_name": user.get("profile", {}).get("display_name"),
+                        "is_bot": user.get("is_bot", False),
+                        "is_admin": user.get("is_admin", False),
+                        "deleted": user.get("deleted", False)
+                    })
+                
+                # Apply limit
+                if limit > 0:
+                    filtered_users = filtered_users[:limit]
+                
+                return {
+                    "operation": "list",
+                    "users": filtered_users,
+                    "user_count": len(filtered_users),
+                    "filter_type": filter_type,
+                    "source": "cache",
+                    "cache_file": client.users_cache_file,
+                    "api_calls": 0,
+                    "success": True,
+                    "note": "Cache-only operation for performance. Use initialize_cache to refresh."
+                }
+                
+            except Exception as e:
+                return {
+                    "operation": "list",
+                    "error": str(e),
+                    "success": False,
+                    "note": "Failed to load users cache. Run initialize_cache first."
+                }
+                
+        elif operation == "presence":
+            # Single user presence
+            if not user_id:
+                return {"error": "user_id required for presence operation", "success": False}
+                
+            resolved_user_id = client.resolve_user_id(user_id)
+            
+            try:
+                data = client._make_request("users.getPresence", {"user": resolved_user_id})
+                return {
+                    "operation": "presence",
+                    "user_id": resolved_user_id,
+                    "user_input": user_id,
+                    "presence": data.get("presence"),
+                    "online": data.get("online"),
+                    "auto_away": data.get("auto_away"),
+                    "manual_away": data.get("manual_away"),
+                    "connection_count": data.get("connection_count"),
+                    "last_activity": data.get("last_activity"),
+                    "api_calls": 1,
+                    "success": True
+                }
+            except Exception as e:
+                return {
+                    "operation": "presence",
+                    "error": str(e),
+                    "user_id": resolved_user_id,
+                    "user_input": user_id,
+                    "success": False
+                }
+                
+        elif operation == "bulk_presence":
+            # Multiple users presence efficiently
+            if not user_ids:
+                return {"error": "user_ids required for bulk_presence operation", "success": False}
+                
+            user_list = [u.strip() for u in user_ids.split(",")]
+            results = []
+            api_calls = 0
+            
+            for user_input in user_list:
+                if not user_input:
+                    continue
+                    
+                try:
+                    resolved_user_id = client.resolve_user_id(user_input)
+                    data = client._make_request("users.getPresence", {"user": resolved_user_id})
+                    api_calls += 1
+                    
+                    results.append({
+                        "user_id": resolved_user_id,
+                        "user_input": user_input,
+                        "presence": data.get("presence"),
+                        "online": data.get("online"),
+                        "auto_away": data.get("auto_away"),
+                        "manual_away": data.get("manual_away"),
+                        "connection_count": data.get("connection_count"),
+                        "last_activity": data.get("last_activity"),
+                        "success": True
+                    })
+                except Exception as e:
+                    results.append({
+                        "user_input": user_input,
+                        "error": str(e),
+                        "success": False
+                    })
+            
+            return {
+                "operation": "bulk_presence",
+                "users": results,
+                "summary": {
+                    "total_users": len(user_list),
+                    "successful_users": len([r for r in results if r.get("success")]),
+                    "failed_users": len([r for r in results if not r.get("success")]),
+                    "api_calls": api_calls
+                },
+                "efficiency_note": f"Retrieved presence for {len(results)} users with {api_calls} API calls",
+                "success": True
+            }
+            
+        else:
+            return {
+                "error": f"Unknown operation: {operation}. Valid: info, list, presence, bulk_presence",
+                "success": False
+            }
+            
+    except Exception as e:
+        return {
+            "error": str(e),
+            "operation": operation,
+            "success": False
+        }
+
 @mcp.tool
 def channel_members(
     channel_id: str,
