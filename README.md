@@ -4,37 +4,26 @@ A Model Context Protocol (MCP) server for Slack workspace integration using Fast
 
 ## Features
 
-### Tools
+### Tools (8 Unified Tools - 65% Reduction from 23 Original Tools!)
 
-#### **Core Messaging Tools**
-- **conversations_history** - Get messages from channels/DMs with enhanced user details
-- **bulk_conversations_history** - Get messages from multiple channels efficiently (avoids N API calls)
-- **conversations_replies** - Get thread messages with pagination  
+#### **🔄 Unified Messaging**
+- **conversations** - All messaging operations (history, bulk_history, replies, search, permalink)
 - **conversations_add_message** - Post messages to channels/DMs (safety disabled by default)
-- **conversations_search_messages** - Search messages with advanced filters
-- **message_permalink** - Get permanent links to specific messages
 
-#### **Channel & User Management**
-- **channels_list** - List all channels with sorting options
-- **channels_detailed** - Get comprehensive channel info efficiently (avoids redundant API calls)
-- **channel_info** - Get detailed channel information (topic, purpose, member count)
-- **channel_members** - List channel members with user details
-- **set_channel_topic** - Update channel topic
-- **set_channel_purpose** - Update channel purpose
-- **user_info** - Get detailed user information and profile (supports multiple users)
-- **users_list** - List all users with filtering options (cache-only for performance)
-- **user_presence** - Check user's online/away status
+#### **🏢 Unified Channel Management**  
+- **channels** - All channel operations (list, detailed, info, members, bulk_info)
+- **channels_manage** - Channel settings (topic, purpose, both)
 
-#### **Workspace & Analytics**
-- **workspace_info** - Get workspace details (name, domain, plan)
-- **analytics_summary** - Workspace analytics from cached data
-- **files_list** - List files with filters by channel/user/type
-- **initialize_cache** - Force creation of both cache files
-- **cache_info** - Show cache file locations, sizes, and status  
-- **clear_cache** - Clear cache files to force refresh
-- **check_permissions** - Test what Slack API scopes are available
+#### **👥 Unified User Management**
+- **users** - All user operations (info, list, presence, bulk_presence)
 
-#### **Interactive Features**
+#### **🌐 Unified Workspace**
+- **workspace** - All workspace operations (info, analytics, files, permissions)
+
+#### **💾 Unified Cache**
+- **cache** - All cache operations (info, initialize, clear)
+
+#### **⚡ Interactive Features**
 - **add_reaction** - Add emoji reactions to messages
 
 ### Resources
@@ -84,27 +73,38 @@ Alternatively, set `SLACK_MCP_XOXP_TOKEN` environment variable for single-user m
 
 ## API Examples
 
-### Get Channel History
+### Get Messages from Multiple Channels (Efficient Bulk Operation)
 ```json
 {
-  "method": "conversations_history",
+  "method": "conversations",
   "params": {
-    "channel_id": "#general",
+    "operation": "bulk_history",
+    "channel_ids": "#general, #random, #project-alpha",
     "limit": "1d",
-    "include_activity_messages": false
+    "filter_user": "@chris"
   }
 }
 ```
 
-### Search Messages
+### Get All Channels with Details (Single Efficient Call)
 ```json
 {
-  "method": "conversations_search_messages", 
+  "method": "channels",
   "params": {
-    "search_query": "project update",
-    "filter_in_channel": "#general",
-    "filter_users_from": "@john",
-    "limit": 50
+    "operation": "detailed",
+    "channel_types": "public_channel,private_channel",
+    "sort": "popularity"
+  }
+}
+```
+
+### Get Info for Multiple Users
+```json
+{
+  "method": "users",
+  "params": {
+    "operation": "info",
+    "user_ids": "@john, @jane, U123456789"
   }
 }
 ```
@@ -165,118 +165,98 @@ The server now accepts user-friendly names in addition to IDs:
   }
 }
 
-// Get detailed info about a user (cache-first, instant)
+// Get workspace analytics from cache (instant)
 {
-  "method": "user_info",
+  "method": "workspace",
   "params": {
-    "user_id": "@gongrzhe"
+    "operation": "analytics",
+    "date_range": "30d"
   }
 }
 
-// Get all channels efficiently (1 API call instead of N channel_info calls)
+// Search messages across channels with filters
 {
-  "method": "channels_detailed",
+  "method": "conversations",
   "params": {
-    "channel_types": "public_channel,private_channel",
-    "sort": "popularity",
-    "limit": 50
+    "operation": "search",
+    "search_query": "deployment status",
+    "filter_in_channel": "#devops",
+    "filter_users_from": "@admin"
   }
 }
 
-// Get messages from multiple channels efficiently (instead of N conversations_history calls)
+// Manage channel settings efficiently
 {
-  "method": "bulk_conversations_history",
+  "method": "channels_manage",
   "params": {
-    "channel_ids": "#general, #random, #project-alpha",
-    "limit": "1d",
-    "filter_user": "@chris"
+    "operation": "both",
+    "channel_id": "#general", 
+    "topic": "Welcome to our main discussion!",
+    "purpose": "General team discussions and updates"
   }
 }
 
-// Get fresh user info from API (slower)
+// Check cache status and manage
 {
-  "method": "user_info", 
+  "method": "cache",
   "params": {
-    "user_id": "@gongrzhe",
-    "use_cache": false
+    "operation": "info"
   }
 }
 
 // List members of #general channel
 {
-  "method": "channel_members",
+  "method": "channels",
   "params": {
+    "operation": "members",
     "channel_id": "#general"
   }
 }
 
-// Get workspace analytics
+// Check user presence for multiple users
 {
-  "method": "analytics_summary",
+  "method": "users",
   "params": {
-    "date_range": "30d"
+    "operation": "bulk_presence",
+    "user_ids": "@john, @jane, @admin"
   }
 }
 
-// Add reaction to a message
+// Get thread replies with user details
 {
-  "method": "add_reaction",
+  "method": "conversations",
   "params": {
+    "operation": "replies",
     "channel_id": "#general",
     "message_ts": "1699123456.123456",
-    "emoji_name": "thumbsup"
+    "include_user_details": true
   }
 }
 
-// Set channel topic
+// List files shared by specific user
 {
-  "method": "set_channel_topic",
+  "method": "workspace",
   "params": {
-    "channel_id": "#general",
-    "topic": "Welcome to our main discussion channel!"
-  }
-}
-
-// Search messages from @john in #project-alpha
-{
-  "method": "conversations_search_messages", 
-  "params": {
-    "search_query": "deployment",
-    "filter_in_channel": "#project-alpha",
-    "filter_users_from": "@john"
-  }
-}
-
-// List files shared by @chris
-{
-  "method": "files_list",
-  "params": {
+    "operation": "files",
     "user_id": "@chris",
     "count": 20,
     "types": "images"
   }
 }
 
-// Check what permissions are available
+// Check what API permissions are available
 {
-  "method": "check_permissions"
-}
-
-// Initialize both cache files
-{
-  "method": "initialize_cache"
-}
-
-// Check cache file locations and status
-{
-  "method": "cache_info"
-}
-
-// Clear all cache files
-{
-  "method": "clear_cache",
+  "method": "workspace",
   "params": {
-    "cache_type": "both"
+    "operation": "permissions"
+  }
+}
+
+// Initialize and manage cache files
+{
+  "method": "cache",
+  "params": {
+    "operation": "initialize"
   }
 }
 ```

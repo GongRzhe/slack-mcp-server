@@ -2049,6 +2049,492 @@ def users(
         }
 
 @mcp.tool
+def workspace(
+    operation: str,
+    date_range: str = "30d",
+    channel_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    count: int = 20,
+    types: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    UNIFIED WORKSPACE TOOL - All workspace operations in one tool
+    
+    Replaces: workspace_info, analytics_summary, files_list, check_permissions (4 tools → 1 tool)
+    
+    Operations:
+        info - Get workspace details (name, domain, plan)
+        analytics - Workspace analytics from cached data
+        files - List files with filters
+        permissions - Check available API scopes
+    
+    Args:
+        operation: Operation type (info, analytics, files, permissions)
+        date_range: Date range for analytics (30d, 7d, 1d)
+        channel_id: Channel filter for files operation
+        user_id: User filter for files operation
+        count: Number of files to return
+        types: File types filter (images, documents, etc.)
+    
+    Returns:
+        Unified response with operation-specific data
+    """
+    client = get_slack_client()
+    
+    try:
+        if operation == "info":
+            # Workspace information
+            try:
+                data = client._make_request("team.info")
+                team = data.get("team", {})
+                
+                return {
+                    "operation": "info",
+                    "workspace": {
+                        "id": team.get("id"),
+                        "name": team.get("name"),
+                        "domain": team.get("domain"),
+                        "email_domain": team.get("email_domain"),
+                        "icon": team.get("icon", {}),
+                        "enterprise_id": team.get("enterprise_id"),
+                        "enterprise_name": team.get("enterprise_name")
+                    },
+                    "api_calls": 1,
+                    "success": True
+                }
+            except Exception as e:
+                # Fallback: try to get basic info from users.list
+                try:
+                    fallback_data = client._make_request("users.list", {"limit": 1})
+                    return {
+                        "operation": "info",
+                        "workspace": {
+                            "note": "Limited workspace info (team:read scope may be missing)"
+                        },
+                        "warning": f"team.info failed: {str(e)}",
+                        "api_calls": 1,
+                        "success": True
+                    }
+                except Exception as fallback_error:
+                    return {
+                        "error": f"team.info failed: {str(e)}, fallback failed: {str(fallback_error)}",
+                        "operation": "info",
+                        "success": False
+                    }
+                    
+        elif operation == "analytics":
+            # Workspace analytics from cached data
+            try:
+                # Get cached data
+                users = client.get_cached_users()
+                channels = client.get_cached_channels()
+                
+                # Calculate analytics
+                total_users = len(users)
+                active_users = len([u for u in users if not u.get("deleted", False)])
+                bot_users = len([u for u in users if u.get("is_bot", False)])
+                admin_users = len([u for u in users if u.get("is_admin", False)])
+                
+                total_channels = len(channels)
+                public_channels = len([c for c in channels if c.get("is_channel", False) and not c.get("is_private", False)])
+                private_channels = len([c for c in channels if c.get("is_private", False)])
+                direct_messages = len([c for c in channels if c.get("is_im", False)])
+                
+                # Most active channels by member count
+                active_channels = sorted(
+                    [c for c in channels if c.get("is_channel", False) and c.get("num_members", 0) > 0],
+                    key=lambda x: x.get("num_members", 0),
+                    reverse=True
+                )[:10]
+                
+                return {
+                    "operation": "analytics",
+                    "date_range": date_range,
+                    "users": {
+                        "total": total_users,
+                        "active": active_users,
+                        "bots": bot_users,
+                        "admins": admin_users,
+                        "deleted": total_users - active_users
+                    },
+                    "channels": {
+                        "total": total_channels,
+                        "public": public_channels,
+                        "private": private_channels,
+                        "direct_messages": direct_messages
+                    },
+                    "top_channels": [
+                        {
+                            "name": c.get("name", "Unknown"),
+                            "id": c.get("id"),
+                            "members": c.get("num_members", 0),
+                            "topic": c.get("topic", {}).get("value", "")[:100]
+                        }
+                        for c in active_channels
+                    ],
+                    "source": "cache",
+                    "api_calls": 0,
+                    "success": True
+                }
+            except Exception as e:
+                return {
+                    "error": f"Analytics failed: {str(e)}",
+                    "operation": "analytics",
+                    "success": False
+                }
+                
+        elif operation == "files":
+            # List files with filters
+            params = {"count": min(count, 1000)}
+            
+            if channel_id:
+                resolved_channel_id = client.resolve_channel_id(channel_id)
+                params["channel"] = resolved_channel_id
+                
+            if user_id:
+                resolved_user_id = client.resolve_user_id(user_id)
+                params["user"] = resolved_user_id
+                
+            if types:
+                params["types"] = types
+            
+            try:
+                data = client._make_request("files.list", params)
+                files = data.get("files", [])
+                
+                # Enhance with user details
+                try:
+                    users = client.get_cached_users()
+                    user_lookup = {user["id"]: user for user in users}
+                    
+                    for file in files:
+                        user_id = file.get("user")
+                        if user_id and user_id in user_lookup:
+                            user_data = user_lookup[user_id]
+                            file["user_details"] = {
+                                "name": user_data.get("name"),
+                                "real_name": user_data.get("real_name")
+                            }
+                except:
+                    pass
+                
+                return {
+                    "operation": "files",
+                    "files": files,
+                    "file_count": len(files),
+                    "filters": {
+                        "channel_id": channel_id,
+                        "user_id": user_id,
+                        "types": types
+                    },
+                    "api_calls": 1,
+                    "success": True
+                }
+            except Exception as e:
+                return {
+                    "error": str(e),
+                    "operation": "files",
+                    "success": False
+                }
+                
+        elif operation == "permissions":
+            # Check API permissions
+            test_calls = [
+                ("users.list", "users:read"),
+                ("conversations.list", "channels:read"),
+                ("team.info", "team:read"),
+                ("files.list", "files:read"),
+                ("search.messages", "search:read")
+            ]
+            
+            permissions = {}
+            api_calls = 0
+            
+            for api_method, scope_name in test_calls:
+                try:
+                    client._make_request(api_method, {"limit": 1})
+                    permissions[scope_name] = "granted"
+                    api_calls += 1
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    if "missing_scope" in error_msg or "not_allowed" in error_msg:
+                        permissions[scope_name] = "missing"
+                    else:
+                        permissions[scope_name] = f"error: {str(e)}"
+                    api_calls += 1
+            
+            return {
+                "operation": "permissions",
+                "permissions": permissions,
+                "summary": {
+                    "granted": len([p for p in permissions.values() if p == "granted"]),
+                    "missing": len([p for p in permissions.values() if p == "missing"]),
+                    "errors": len([p for p in permissions.values() if p.startswith("error")])
+                },
+                "api_calls": api_calls,
+                "success": True
+            }
+            
+        else:
+            return {
+                "error": f"Unknown operation: {operation}. Valid: info, analytics, files, permissions",
+                "success": False
+            }
+            
+    except Exception as e:
+        return {
+            "error": str(e),
+            "operation": operation,
+            "success": False
+        }
+
+@mcp.tool
+def cache(
+    operation: str,
+    cache_type: str = "both"
+) -> Dict[str, Any]:
+    """
+    UNIFIED CACHE TOOL - All cache operations in one tool
+    
+    Replaces: initialize_cache, cache_info, clear_cache (3 tools → 1 tool)
+    
+    Operations:
+        info - Show cache file locations, sizes, and status
+        initialize - Force creation of both cache files
+        clear - Clear cache files to force refresh
+    
+    Args:
+        operation: Operation type (info, initialize, clear)
+        cache_type: Cache type for clear operation (users, channels, both)
+    
+    Returns:
+        Unified response with cache operation results
+    """
+    client = get_slack_client()
+    
+    try:
+        if operation == "info":
+            # Cache information
+            import os
+            
+            users_cache_exists = os.path.exists(client.users_cache_file)
+            channels_cache_exists = os.path.exists(client.channels_cache_file)
+            
+            cache_info = {
+                "users_cache": {
+                    "path": client.users_cache_file,
+                    "exists": users_cache_exists,
+                    "size_kb": round(os.path.getsize(client.users_cache_file) / 1024, 2) if users_cache_exists else 0,
+                    "modified": os.path.getmtime(client.users_cache_file) if users_cache_exists else None
+                },
+                "channels_cache": {
+                    "path": client.channels_cache_file,
+                    "exists": channels_cache_exists,
+                    "size_kb": round(os.path.getsize(client.channels_cache_file) / 1024, 2) if channels_cache_exists else 0,
+                    "modified": os.path.getmtime(client.channels_cache_file) if channels_cache_exists else None
+                }
+            }
+            
+            return {
+                "operation": "info",
+                "cache_info": cache_info,
+                "cache_directory": os.path.dirname(client.users_cache_file),
+                "success": True
+            }
+            
+        elif operation == "initialize":
+            # Initialize cache files
+            results = {}
+            api_calls = 0
+            
+            try:
+                # Initialize users cache
+                users = client.get_cached_users(cache_duration_hours=0)  # Force refresh
+                results["users_cache"] = {
+                    "status": "created",
+                    "user_count": len(users),
+                    "path": client.users_cache_file
+                }
+                api_calls += 1
+            except Exception as e:
+                results["users_cache"] = {
+                    "status": "failed",
+                    "error": str(e)
+                }
+            
+            try:
+                # Initialize channels cache
+                channels = client.get_cached_channels(cache_duration_hours=0)  # Force refresh
+                results["channels_cache"] = {
+                    "status": "created",
+                    "channel_count": len(channels),
+                    "path": client.channels_cache_file
+                }
+                api_calls += 1
+            except Exception as e:
+                results["channels_cache"] = {
+                    "status": "failed",
+                    "error": str(e)
+                }
+            
+            return {
+                "operation": "initialize",
+                "results": results,
+                "api_calls": api_calls,
+                "success": True
+            }
+            
+        elif operation == "clear":
+            # Clear cache files
+            import os
+            
+            results = {}
+            
+            if cache_type in ["users", "both"]:
+                try:
+                    if os.path.exists(client.users_cache_file):
+                        os.remove(client.users_cache_file)
+                        results["users_cache"] = "cleared"
+                    else:
+                        results["users_cache"] = "not_found"
+                except Exception as e:
+                    results["users_cache"] = f"error: {str(e)}"
+            
+            if cache_type in ["channels", "both"]:
+                try:
+                    if os.path.exists(client.channels_cache_file):
+                        os.remove(client.channels_cache_file)
+                        results["channels_cache"] = "cleared"
+                    else:
+                        results["channels_cache"] = "not_found"
+                except Exception as e:
+                    results["channels_cache"] = f"error: {str(e)}"
+            
+            return {
+                "operation": "clear",
+                "cache_type": cache_type,
+                "results": results,
+                "success": True
+            }
+            
+        else:
+            return {
+                "error": f"Unknown operation: {operation}. Valid: info, initialize, clear",
+                "success": False
+            }
+            
+    except Exception as e:
+        return {
+            "error": str(e),
+            "operation": operation,
+            "success": False
+        }
+
+@mcp.tool
+def channels_manage(
+    operation: str,
+    channel_id: str,
+    topic: Optional[str] = None,
+    purpose: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    UNIFIED CHANNEL MANAGEMENT TOOL - Channel settings operations
+    
+    Replaces: set_channel_topic, set_channel_purpose (2 tools → 1 tool)
+    
+    Operations:
+        topic - Set channel topic
+        purpose - Set channel purpose
+        both - Set both topic and purpose
+    
+    Args:
+        operation: Operation type (topic, purpose, both)
+        channel_id: Channel ID (C1234567890) or name (#general)
+        topic: New topic text (for topic/both operations)
+        purpose: New purpose text (for purpose/both operations)
+    
+    Returns:
+        Success status and updated information
+    """
+    client = get_slack_client()
+    resolved_channel_id = client.resolve_channel_id(channel_id)
+    
+    try:
+        results = {}
+        api_calls = 0
+        
+        if operation in ["topic", "both"]:
+            if not topic:
+                return {"error": "topic required for topic operation", "success": False}
+                
+            try:
+                data = client._make_request("conversations.setTopic", {
+                    "channel": resolved_channel_id,
+                    "topic": topic
+                })
+                results["topic"] = {
+                    "status": "updated",
+                    "topic": data.get("topic"),
+                    "success": True
+                }
+                api_calls += 1
+            except Exception as e:
+                results["topic"] = {
+                    "status": "failed",
+                    "error": str(e),
+                    "success": False
+                }
+        
+        if operation in ["purpose", "both"]:
+            if not purpose:
+                return {"error": "purpose required for purpose operation", "success": False}
+                
+            try:
+                data = client._make_request("conversations.setPurpose", {
+                    "channel": resolved_channel_id,
+                    "purpose": purpose
+                })
+                results["purpose"] = {
+                    "status": "updated", 
+                    "purpose": data.get("purpose"),
+                    "success": True
+                }
+                api_calls += 1
+            except Exception as e:
+                results["purpose"] = {
+                    "status": "failed",
+                    "error": str(e),
+                    "success": False
+                }
+        
+        if operation not in ["topic", "purpose", "both"]:
+            return {
+                "error": f"Unknown operation: {operation}. Valid: topic, purpose, both",
+                "success": False
+            }
+        
+        # Determine overall success
+        all_successful = all(r.get("success", True) for r in results.values())
+        
+        return {
+            "operation": operation,
+            "channel_id": resolved_channel_id,
+            "channel_input": channel_id,
+            "results": results,
+            "api_calls": api_calls,
+            "success": all_successful
+        }
+        
+    except Exception as e:
+        return {
+            "error": str(e),
+            "operation": operation,
+            "channel_id": channel_id,
+            "resolved_channel_id": resolved_channel_id,
+            "success": False
+        }
+
+@mcp.tool
 def channel_members(
     channel_id: str,
     limit: int = 100,
